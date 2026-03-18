@@ -1234,6 +1234,9 @@ extern "C" {
 
     LLAMA_API void llama_perf_dump_yaml(FILE * stream, const struct llama_context * ctx);
 
+    LLAMA_API void llama_set_dgs_bias(float bias);
+    LLAMA_API float llama_get_dgs_bias(void);
+
 #ifdef __cplusplus
 }
 #endif

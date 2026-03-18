@@ -1357,7 +1357,13 @@ add_library(ggml
             ${GGML_SOURCES_LLAMAFILE} ${GGML_HEADERS_LLAMAFILE}
             ${GGML_SOURCES_CANN}      ${GGML_HEADERS_CANN}
             ggml-aarch64.c            ggml-aarch64.h
+            mtfp_avx.cpp              mtfp_avx.h
+            bbdos_apu.c
+            ggml-lcache.c             ../include/ggml-lcache.h
+            bbdos_lcache_shim.c       bbdos_lcache_shim.h
             )
+
+add_compile_definitions(GGML_BBDOS_LCACHE)
 
 if (EMSCRIPTEN)
     set_target_properties(ggml PROPERTIES COMPILE_FLAGS "-msimd128")

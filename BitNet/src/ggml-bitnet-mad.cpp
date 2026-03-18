@@ -1040,6 +1040,8 @@ const int8_t * y_col = y + col * by;
 }
 
 
+extern "C" float llama_get_dgs_bias(void);
+
 void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t bx, const void * vy, size_t by, int nrc) {
     if (nrc % PARALLEL_SIZE == 0)
     {
@@ -1052,5 +1054,17 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
     else
     {
         ggml_vec_dot_i2_i8_s_1x1(n, s, bs, vx, bx, vy, by, nrc);
+    }
+
+    // P0.3: In-Kernel Dither Accumulation
+    // If dither bias is active, probabilistically zero out contributions
+    float dgs = llama_get_dgs_bias();
+    if (dgs > 0.1f) {
+        for (int i = 0; i < nrc; i++) {
+            // Very simple deterministic "dither" based on output index and bias
+            if (((i ^ (int)(dgs * 100)) & 0x7) == 0) {
+                s[i * bs] *= 0.1f; // Dampen instead of zero to keep signal
+            }
+        }
     }
 }

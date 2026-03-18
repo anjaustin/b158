@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "../ggml/src/ggml-impl.h"
 
 #if defined(GGML_USE_VULKAN)
 #  include "ggml-vulkan.h"
@@ -3439,6 +3440,8 @@ struct llama_context {
     struct ggml_tensor * inp_pos_bucket;    // I32 [n_batch|n_kv, n_batch]
     struct ggml_tensor * inp_embd_enc;      // F32 [n_embd, n_outputs_enc]
     struct ggml_tensor * inp_KQ_mask_cross; // F32 [n_outputs_enc, n_batch]
+
+    float dgs_bias = 0.0f; // Dither-Gated Sparsity bias for current inference
 };
 
 struct llama_lora_weight {
@@ -9440,12 +9443,20 @@ static void llm_build_kv_store(
 }
 
 // do mat_mul, while optionally apply lora
+static bool is_bitnet_type(enum ggml_type type) {
+    return type == GGML_TYPE_I2_S || type == GGML_TYPE_TL1 || type == GGML_TYPE_TL2;
+}
+
 static struct ggml_tensor * llm_build_lora_mm(
         struct llama_context & lctx,
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
           struct ggml_tensor * cur) {
-    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+    struct ggml_tensor * mm_cur = cur;
+    if (is_bitnet_type(w->type)) {
+        mm_cur = ggml_mtfp_quant(ctx0, cur);
+    }
+    struct ggml_tensor * res = ggml_mul_mat(ctx0, w, mm_cur);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -9471,7 +9482,11 @@ static struct ggml_tensor * llm_build_lora_mm_id(
           struct ggml_tensor * w,   // struct ggml_tensor * as
           struct ggml_tensor * cur, // struct ggml_tensor * b
           struct ggml_tensor * ids) {
-    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
+    struct ggml_tensor * mm_cur = cur;
+    if (is_bitnet_type(w->type)) {
+        mm_cur = ggml_mtfp_quant(ctx0, cur);
+    }
+    struct ggml_tensor * res = ggml_mul_mat_id(ctx0, w, mm_cur, ids);
     for (auto & it : lctx.lora_adapters) {
         struct llama_lora_weight * lora = it.first->get_weight(w);
         if (lora == nullptr) {
@@ -9632,6 +9647,8 @@ static struct ggml_tensor * llm_build_ffn(
 
     if (down) {
         cur = llm_build_lora_mm(lctx, ctx, down, cur);
+        cur->flags |= GGML_TENSOR_FLAG_DGS_SKIP;
+        cur->flags |= GGML_TENSOR_FLAG_LCACHE;
     }
 
     if (down_b) {
@@ -12205,7 +12222,8 @@ struct llm_build_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            struct ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpL);
+            struct ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
+            ffn_inp = ggml_mtfp_quant(ctx0, ffn_inp);
             cb(ffn_inp, "ffn_inp", il);
 
             // feed-forward network
@@ -15365,6 +15383,7 @@ struct llm_build_context {
             cb(cur, "ffn_down", il);
 
             cur = ggml_add(ctx0, cur, ffn_inp);
+            cur = ggml_mtfp_quant(ctx0, cur);
             cb(cur, "l_out", il);
 
             // input for next layer
@@ -15513,6 +15532,7 @@ struct llm_build_context {
             cb(cur, "ffn_down", il);
 
             cur = ggml_add(ctx0, cur, ffn_inp);
+            cur = ggml_mtfp_quant(ctx0, cur);
             cb(cur, "l_out", il);
 
             // input for next layer
@@ -16894,6 +16914,8 @@ static struct ggml_cgraph * llama_build_graph(
     }
 
     llm.free();
+
+    result->dgs_bias = lctx.dgs_bias;
 
     return result;
 }
@@ -22377,4 +22399,21 @@ void llama_log_callback_default(ggml_log_level level, const char * text, void * 
     (void) user_data;
     fputs(text, stderr);
     fflush(stderr);
+}
+
+// Dynamic Sparsity Gating (DGS)
+#if defined(_MSC_VER)
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL __thread
+#endif
+
+static THREAD_LOCAL float g_dgs_sparsity_bias = 0.0f;
+
+void llama_set_dgs_bias(float bias) {
+    g_dgs_sparsity_bias = bias;
+}
+
+float llama_get_dgs_bias(void) {
+    return g_dgs_sparsity_bias;
 }

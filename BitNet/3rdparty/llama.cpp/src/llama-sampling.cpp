@@ -1,5 +1,5 @@
 #include "llama-sampling.h"
-
+#include "llama.h"
 #include "llama-vocab.h"
 #include "llama-grammar.h"
 
@@ -1704,6 +1704,8 @@ static void llama_sampler_dither_apply(struct llama_sampler * smpl, llama_token_
         float normalized = (spread - 1.0f) / 49.0f;
         scale = ctx->intensity * (1.0f - normalized * 0.8f);
     }
+
+    llama_set_dgs_bias(scale);
 
     for (size_t i = 0; i < cur_p->size; ++i) {
         float dither = 0.0f;

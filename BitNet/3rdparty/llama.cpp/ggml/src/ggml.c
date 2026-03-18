@@ -5,6 +5,26 @@
 #include "ggml-impl.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-quants.h"
+
+// BBDOS L-Cache / Ternary Compute Integration
+#ifdef GGML_BBDOS_LCACHE
+#include "ggml-lcache.h"
+#include "bbdos_lcache_shim.h"
+
+static ggml_lcache_t* g_ggml_lcache = NULL;
+static BBDOS_Context* g_bbdos_ctx = NULL;
+
+void ggml_lcache_set(ggml_lcache_t* cache) { g_ggml_lcache = cache; }
+ggml_lcache_t* ggml_lcache_get(void) { return g_ggml_lcache; }
+
+static BBDOS_Context* ggml_bbdos_get_ctx(void) {
+    if (!g_bbdos_ctx) {
+        g_bbdos_ctx = bbdos_create(64);
+    }
+    return g_bbdos_ctx;
+}
+#endif
+
 #include "ggml.h"
 #include "ggml-aarch64.h"
 
@@ -3224,9 +3244,11 @@ static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
     "HARDSWISH",
     "HARDSIGMOID",
     "EXP",
+    "TRIT_QUANT",
+    "MTFP_QUANT",
 };
 
-static_assert(GGML_UNARY_OP_COUNT == 14, "GGML_UNARY_OP_COUNT != 14");
+static_assert(GGML_UNARY_OP_COUNT == 16, "GGML_UNARY_OP_COUNT != 16");
 
 
 static_assert(sizeof(struct ggml_object)%GGML_MEM_ALIGN == 0, "ggml_object size must be a multiple of GGML_MEM_ALIGN");
@@ -7538,6 +7560,18 @@ static struct ggml_tensor * ggml_unary_impl(
     result->src[0] = a;
 
     return result;
+}
+
+struct ggml_tensor * ggml_trit_quant(
+        struct ggml_context * ctx,
+        struct ggml_tensor * a) {
+    return ggml_unary(ctx, a, GGML_UNARY_OP_TRIT_QUANT);
+}
+
+struct ggml_tensor * ggml_mtfp_quant(
+        struct ggml_context * ctx,
+        struct ggml_tensor * a) {
+    return ggml_unary(ctx, a, GGML_UNARY_OP_MTFP_QUANT);
 }
 
 struct ggml_tensor * ggml_unary(
@@ -12540,6 +12574,47 @@ static inline int nearest_int(float fval) {
     return (i & 0x007fffff) - 0x00400000;
 }
 
+// MTFP16: 8-trit Multi-Trit Floating Point (1 sign, 4 exp, 3 mantissa)
+void float_mtfp16_quant(const int K, float* B, float* dst) {
+    for (int i = 0; i < K; ++i) {
+        float v = B[i];
+        if (v == 0.0f) { dst[i] = 0.0f; continue; }
+        
+        // Scalar implementation of MTFP packing/unpacking cycle to "quantize" the float
+        int8_t trits[8];
+        int sign = (v < 0) ? 1 : 0;
+        float abs_v = fabsf(v);
+        
+        int exp = 0;
+        if (abs_v >= 1.0f) {
+            while (abs_v >= 3.0f && exp < 40) { abs_v /= 3.0f; exp++; }
+        } else {
+            while (abs_v < 1.0f && exp > -40) { abs_v *= 3.0f; exp--; }
+        }
+        
+        int mantissa = (int)(abs_v * 9.0f); // 3-trit mantissa base 3 is 27, but we'll use 9 for simplicity here
+        
+        // Unpack back to float
+        float res = (float)mantissa / 9.0f * powf(3.0f, (float)exp);
+        dst[i] = (sign == 1) ? -res : res;
+    }
+}
+
+void float_trit_quant(const int K, float* B, float* dst) {
+    float sum = 0.0f;
+    for (int i = 0; i < K; ++i) {
+        sum += fabsf(B[i]);
+    }
+    float gamma = sum / (K > 0 ? K : 1);
+    float threshold = gamma * 0.5f;
+
+    for (int i = 0; i < K; ++i) {
+        if (B[i] > threshold) dst[i] = 1.0f;
+        else if (B[i] < -threshold) dst[i] = -1.0f;
+        else dst[i] = 0.0f;
+    }
+}
+
 void float_act_quant(const int K, float* B, int32_t* dst, float* act_scale) {
     double min = 0.00001;
     double max = min;
@@ -17192,6 +17267,70 @@ static void ggml_compute_forward_win_unpart(
 
 //gmml_compute_forward_unary
 
+static void ggml_compute_forward_trit_quant(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t ne0 = src0->ne[0];
+    const int64_t ne1 = src0->ne[1];
+    const int64_t ne2 = src0->ne[2];
+    const int64_t ne3 = src0->ne[3];
+
+    const size_t nb0 = src0->nb[0];
+    const size_t nb1 = src0->nb[1];
+    const size_t nb2 = src0->nb[2];
+    const size_t nb3 = src0->nb[3];
+
+    const size_t nbd0 = dst->nb[0];
+    const size_t nbd1 = dst->nb[1];
+    const size_t nbd2 = dst->nb[2];
+    const size_t nbd3 = dst->nb[3];
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+
+    for (int64_t i3 = 0; i3 < ne3; i3++) {
+        for (int64_t i2 = 0; i2 < ne2; i2++) {
+            for (int64_t i1 = ith; i1 < ne1; i1 += nth) {
+                float_trit_quant(ne0, (float *)((char *)src0->data + i3*nb3 + i2*nb2 + i1*nb1),
+                                      (float *)((char *)dst->data  + i3*nbd3 + i2*nbd2 + i1*nbd1));
+            }
+        }
+    }
+}
+
+static void ggml_compute_forward_mtfp_quant(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t ne0 = src0->ne[0];
+    const int64_t ne1 = src0->ne[1];
+    const int64_t ne2 = src0->ne[2];
+    const int64_t ne3 = src0->ne[3];
+
+    const size_t nb1 = src0->nb[1];
+    const size_t nb2 = src0->nb[2];
+    const size_t nb3 = src0->nb[3];
+
+    const size_t nbd1 = dst->nb[1];
+    const size_t nbd2 = dst->nb[2];
+    const size_t nbd3 = dst->nb[3];
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+
+    for (int64_t i3 = 0; i3 < ne3; i3++) {
+        for (int64_t i2 = 0; i2 < ne2; i2++) {
+            for (int64_t i1 = ith; i1 < ne1; i1 += nth) {
+                float_mtfp16_quant(ne0, (float *)((char *)src0->data + i3*nb3 + i2*nb2 + i1*nb1),
+                                        (float *)((char *)dst->data  + i3*nbd3 + i2*nbd2 + i1*nbd1));
+            }
+        }
+    }
+}
+
 static void ggml_compute_forward_unary(
         const struct ggml_compute_params * params,
         struct ggml_tensor * dst) {
@@ -17254,6 +17393,14 @@ static void ggml_compute_forward_unary(
         case GGML_UNARY_OP_EXP:
             {
                 ggml_compute_forward_exp(params, dst);
+            } break;
+        case GGML_UNARY_OP_TRIT_QUANT:
+            {
+                ggml_compute_forward_trit_quant(params, dst);
+            } break;
+        case GGML_UNARY_OP_MTFP_QUANT:
+            {
+                ggml_compute_forward_mtfp_quant(params, dst);
             } break;
         default:
             {
@@ -19973,6 +20120,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_UNARY_OP_HARDSWISH:
                 case GGML_UNARY_OP_HARDSIGMOID:
                 case GGML_UNARY_OP_EXP:
+                case GGML_UNARY_OP_TRIT_QUANT:
+                case GGML_UNARY_OP_MTFP_QUANT:
                     {
                         n_tasks = 1;
                     } break;
@@ -20608,7 +20757,58 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
     for (int node_n = 0; node_n < cgraph->n_nodes && !tp->abort; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
 
+#ifdef GGML_BBDOS_LCACHE
+        bool skip_compute = false;
+        if (g_ggml_lcache && g_ggml_lcache->enabled && (node->flags & GGML_TENSOR_FLAG_LCACHE) && state->ith == 0) {
+            uint64_t input_hash = 0;
+            if (node->src[0]) {
+                // Red-Team Fix: Semantic Hashing (Content + Metadata) to avoid collisions
+                input_hash = ggml_lcache_hash_tensor(node->src[0]->data, ggml_nbytes(node->src[0]));
+                // Mix in the tensor name and dims for higher entropy
+                for (int i = 0; node->name[i] && i < 8; i++) input_hash ^= ((uint64_t)node->name[i] << (i * 8));
+                input_hash ^= (uint64_t)node->ne[0] ^ (uint64_t)node->ne[1];
+            }
+            
+            float* cached_output = NULL;
+            if (ggml_lcache_lookup(g_ggml_lcache, node->name, input_hash, &cached_output)) {
+                memcpy(node->data, cached_output, ggml_nbytes(node));
+                skip_compute = true;
+            }
+        }
+
+        // Prototype: Dither-Gated Sparsity (DGS)
+        // If dither bias is extremely high, we skip marked projections to save FLOPs
+        if (!skip_compute && (node->flags & GGML_TENSOR_FLAG_DGS_SKIP)) {
+            if (cgraph->dgs_bias > 0.15f) {
+                skip_compute = true;
+                // Identity skip: If skipping a projection, output is often the input or zero
+                // For a MatMul projection, we default to zeroing out to indicate "no contribution"
+                // But for a residual stream skip, we would return the input.
+                // Red-Team Fix: Ensure we don't break normalization (Zero-Output NaN risk)
+                // We add a tiny epsilon to the first element to prevent pure zero variance.
+                memset(node->data, 0, ggml_nbytes(node));
+                if (ggml_nelements(node) > 0) {
+                    ((float*)node->data)[0] = 1e-9f; 
+                }
+            }
+        }
+        
+        if (!skip_compute) {
+            ggml_compute_forward(&params, node);
+            
+            if (g_ggml_lcache && g_ggml_lcache->enabled && (node->flags & GGML_TENSOR_FLAG_LCACHE) && state->ith == 0) {
+                uint64_t input_hash = 0;
+                if (node->src[0]) {
+                    input_hash = ggml_lcache_hash_tensor(node->src[0]->data, ggml_nbytes(node->src[0]));
+                    for (int i = 0; node->name[i] && i < 8; i++) input_hash ^= ((uint64_t)node->name[i] << (i * 8));
+                    input_hash ^= (uint64_t)node->ne[0] ^ (uint64_t)node->ne[1];
+                }
+                ggml_lcache_store(g_ggml_lcache, node->name, input_hash, (float*)node->data, ggml_nbytes(node));
+            }
+        }
+#else
         ggml_compute_forward(&params, node);
+#endif
 
         if (state->ith == 0 && cplan->abort_callback &&
                 cplan->abort_callback(cplan->abort_callback_data)) {

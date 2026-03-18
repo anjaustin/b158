@@ -551,6 +551,8 @@ extern "C" {
         GGML_UNARY_OP_HARDSWISH,
         GGML_UNARY_OP_HARDSIGMOID,
         GGML_UNARY_OP_EXP,
+        GGML_UNARY_OP_TRIT_QUANT,
+        GGML_UNARY_OP_MTFP_QUANT,
 
         GGML_UNARY_OP_COUNT,
     };
@@ -576,7 +578,13 @@ extern "C" {
         GGML_TENSOR_FLAG_OUTPUT =  2, // ...is an output for the GGML compute graph
         GGML_TENSOR_FLAG_PARAM  =  4, // ...contains trainable parameters
         GGML_TENSOR_FLAG_LOSS   =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
+        GGML_TENSOR_FLAG_DGS_SKIP = 16, // ...can be skipped by Dither-Gated Sparsity
+        GGML_TENSOR_FLAG_LCACHE   = 32, // ...should be processed by L-Cache
     };
+
+    // ...
+
+    struct ggml_cgraph; // forward declaration
 
     // n-dimensional tensor
     struct ggml_tensor {
@@ -1860,6 +1868,14 @@ extern "C" {
             int                   w0,
             int                   h0,
             int                   w);
+
+    GGML_API struct ggml_tensor * ggml_trit_quant(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+
+    GGML_API struct ggml_tensor * ggml_mtfp_quant(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
 
     GGML_API struct ggml_tensor * ggml_unary(
             struct ggml_context * ctx,
