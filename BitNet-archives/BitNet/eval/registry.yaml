@@ -1,0 +1,76 @@
+# ============================================================
+# EXPERIMENT REGISTRY
+# ============================================================
+# Central index of all experiments for querying and tracking.
+# Update this file whenever a new experiment is created.
+# ============================================================
+
+metadata:
+  project: BitNet b1.58 Optimization Experiments
+  created: 2024-XX-XX
+  last_updated: 2024-XX-XX
+  total_experiments: 0
+  
+# Counter for generating unique IDs
+next_id: 1
+
+# Experiment index
+experiments: []
+  # Example entry:
+  # - id: exp_001
+  #   algorithm: baseline
+  #   date: 2024-XX-XX
+  #   status: complete
+  #   path: experiments/baseline/2024-XX-XX_baseline_complete.md
+  #   tags: [baseline, control]
+  #   sections: [2, 6]
+  #   primary_pass: true
+  #   enhancement_score: null
+
+# Algorithm registry
+algorithms:
+  baseline:
+    description: Unmodified bitnet.cpp inference
+    category: control
+    experiments: []
+    
+  # Add new algorithms here as they are tested:
+  # algorithm_name:
+  #   description: <what it does>
+  #   category: <dithering|signal_processing|sampling|other>
+  #   experiments: [exp_XXX, ...]
+
+# Tag index (for quick lookups)
+tags:
+  baseline: []
+  control: []
+  math: []
+  physics: []
+  reasoning: []
+  dithering: []
+  signal_processing: []
+  promising: []
+  rejected: []
+
+# Section index (which experiments inform which sections)
+sections:
+  1: []  # Introduction
+  2: []  # Model Configuration
+  3: []  # Test Battery Design
+  4: []  # Benchmark Suite
+  5: []  # Signal Processing Metrics
+  6: []  # Experimental Protocol
+  7: []  # Success Criteria
+  8: []  # Data Collection
+  9: []  # References
+
+# Quick stats
+stats:
+  total_runs: 0
+  passed_primary: 0
+  rejected: 0
+  by_category:
+    dithering: 0
+    signal_processing: 0
+    sampling: 0
+    other: 0

@@ -1,0 +1,113 @@
+# Multi-stage Dockerfile for BitNet compilation on Jetson AGX Thor
+# Stage 1: Build environment
+FROM nvcr.io/nvidia/l4t-pytorch:r35.2.1-pth2.0-py3 as builder
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    vim \
+    clang-18 \
+    llvm-18 \
+    ninja-build \
+    python3-pip \
+    python3-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set clang-18 as default
+RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+# Install Python dependencies
+RUN pip3 install --upgrade pip setuptools wheel
+RUN pip3 install \
+    torch \
+    torchvision \
+    torchaudio \
+    numpy \
+    scipy \
+    transformers \
+    huggingface_hub \
+    gguf \
+    cmake \
+    ninja
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy BitNet source code
+COPY BitNet/ /workspace/BitNet/
+
+# Set working directory to BitNet
+WORKDIR /workspace/BitNet
+
+# Install GGUF package
+RUN python3 -m pip install 3rdparty/llama.cpp/gguf-py
+
+# Generate optimized kernels for x86_64 architecture
+RUN python3 utils/codegen_tl2.py --model bitnet_b1_58-3B --BM 160,320,320 --BK 96,96,96 --bm 32,32,32
+
+# Generate build files with CUDA support for Jetson AGX Thor
+RUN cmake -B build \
+    -DBITNET_X86_TL2=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+    -DCMAKE_CUDA_ARCHITECTURES=87 \
+    -GNinja
+
+# Build the project with parallel compilation
+RUN cmake --build build --config Release --parallel $(nproc)
+
+# Stage 2: Runtime environment
+FROM nvcr.io/nvidia/l4t-pytorch:r35.2.1-pth2.0-py3
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libopenblas-dev \
+    liblapack-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python runtime dependencies
+RUN pip3 install \
+    torch \
+    torchvision \
+    torchaudio \
+    numpy \
+    scipy \
+    transformers \
+    huggingface_hub \
+    gguf
+
+# Copy built binaries and libraries from builder stage
+COPY --from=builder /workspace/BitNet/build/ /workspace/BitNet/build/
+COPY --from=builder /workspace/BitNet/include/ /workspace/BitNet/include/
+COPY --from=builder /workspace/BitNet/utils/ /workspace/BitNet/utils/
+COPY --from=builder /workspace/BitNet/run_inference.py /workspace/BitNet/
+
+# Set working directory
+WORKDIR /workspace/BitNet
+
+# Set up environment
+ENV PYTHONPATH=/workspace/BitNet:$PYTHONPATH
+ENV PATH=/workspace/BitNet/build/bin:$PATH
+
+# Create models directory
+RUN mkdir -p /workspace/BitNet/models
+
+# Default command
+CMD ["/bin/bash"]

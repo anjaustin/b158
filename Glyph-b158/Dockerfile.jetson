@@ -1,0 +1,77 @@
+# Dockerfile for BitNet compilation on Jetson AGX Thor
+FROM nvcr.io/nvidia/l4t-pytorch:r35.2.1-pth2.0-py3
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    vim \
+    clang \
+    clang-18 \
+    llvm-18 \
+    ninja-build \
+    python3-pip \
+    python3-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set clang-18 as default
+RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+# Install Python dependencies
+RUN pip3 install --upgrade pip setuptools wheel
+RUN pip3 install \
+    torch \
+    torchvision \
+    torchaudio \
+    numpy \
+    scipy \
+    transformers \
+    huggingface_hub \
+    gguf \
+    cmake \
+    ninja
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy BitNet source code
+COPY BitNet/ /workspace/BitNet/
+
+# Set permissions and prepare build environment
+RUN chmod +x /workspace/BitNet/setup_env.py
+
+# Create build directory and compile
+WORKDIR /workspace/BitNet
+
+# Generate build files with CUDA support
+RUN cmake -B build \
+    -DBITNET_X86_TL2=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+    -DCMAKE_CUDA_ARCHITECTURES=87 \
+    -G Ninja
+
+# Build the project
+RUN cmake --build build --config Release -j$(nproc)
+
+# Set up environment for running
+ENV PYTHONPATH=/workspace/BitNet:$PYTHONPATH
+
+# Default command
+CMD ["/bin/bash"]
