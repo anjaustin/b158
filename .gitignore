@@ -1,0 +1,19 @@
+# Nested git repos (BitNet forks)
+BitNet/.git
+BitNet-archives/BitNet/.git
+BitNet-archives/BitNet-original/.git
+Glyph-b158/BitNet/.git
+
+# IDE
+.vscode/
+*.o
+*.bin
+debug
+dither_test
+dither_fix
+test_corrected
+test_e2e
+test_fixed_position
+test_phase_transitions
+debug_dither
+
