@@ -26,6 +26,21 @@ python utils/codegen_tl1.py --model bitnet_b1_58-large --BM 256,128,256 --BK 128
 python utils/codegen_tl2.py --model bitnet_b1_58-large --BM 256,128,256 --BK 96,192,96 --bm 32,32,32
 ```
 
+BitNet-b1.58-2B-4T on x86 uses four TL2 kernel shapes:
+
+```text
+[2560, 6912]
+[6912, 2560]
+[2560, 2560]
+[640, 2560]
+```
+
+Example command:
+
+```bash
+python utils/codegen_tl2.py --model BitNet-b1.58-2B-4T --BM 160,384,160,160 --BK 96,96,96,96 --bm 32,32,32,32
+```
+
 ### TL1:
 ![TL1](../assets/tl1.png)
 
@@ -42,8 +57,13 @@ Thus, we need to make sure
 
 For TL2, things got a little more complicated. Due to TL2 needs BK % 6 == 0, we need to split K into threeK and twoK, in which compute in TL2 for (M, threeK), compute in TL1 for (M, two_K).
 
-Thus, we needs to make sure
+Thus, we need to make sure
 - M % BM == 0
 - K % BK % 32 == 0
 - BM % bm == 0
 - bm choose in \[32\]
+
+Operational notes:
+
+- Generate TL2 kernels from the bf16 source checkpoint, not from a prepacked `i2_s` or `gguf` model.
+- After changing TL2 codegen, rebuild `3rdparty/llama.cpp` with `make clean && make ...` so the generated header and `ggml.c` stay in sync.

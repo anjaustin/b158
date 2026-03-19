@@ -149,6 +149,34 @@ Test configuration: BitNet-b1.58-2B-4T, TG128
 
 ## Performance
 
+### TL2 vs I2_S on x86
+
+Recent single-thread measurements on BitNet-b1.58-2B-4T using `llama-bench -t 1 -p 512 -n 128` show the current tradeoff between the x86 TL2 LUT path and the I2_S path:
+
+| Format | Source Model | GGUF Size | `pp512` | `tg128` |
+|:---:|:---:|---:|---:|---:|
+| I2_S | `BitNet-b1.58-2B-4T-gguf` | 1.71 GiB | 11.03 ± 2.37 tok/s | 5.89 ± 0.87 tok/s |
+| TL2 | `bitnet-b1.58-2B-4T-bf16` | 1.02 GiB | 9.93 ± 0.84 tok/s | 6.63 ± 0.64 tok/s |
+
+Takeaway:
+
+- **TL2** currently improves token generation throughput and reduces memory footprint on x86.
+- **I2_S** currently remains faster on prompt processing in this benchmark.
+- TL2 requires the bf16 source checkpoint plus TL2 codegen; see `docs/tl2-x86.md` for the exact workflow.
+
+### Bottom-level hotspot summary
+
+Recent profiling on the 2B x86 TL2 path shows that the dominant remaining cost is no longer the ternary kernel itself.
+
+- The major TL2-covered ternary blocks are already the `attn_q`, `attn_k`, `attn_v`, `attn_output`, `ffn_up`, `ffn_gate`, and `ffn_down` projections.
+- `softmax`, `RoPE`, and `RMSNorm` are small compared with matrix multiplication time.
+- The biggest remaining hotspots are generic `f16 x f32` fallback matmuls:
+  - `result_output` / logits projection (`2560 x 128256`)
+  - `kq` attention score matmul over KV-cache-backed tensors (`128 x {32,64,96,512}`)
+  - `kqv` value aggregation matmul (`{32,64,96} x 128`)
+
+Current conclusion: the next meaningful wins are more likely in the non-ternary logits path and KV-cache attention kernels than in further ternary LUT tuning.
+
 Comparison of optimized parallel kernels vs. original implementation:
 
 **Test Configuration:**

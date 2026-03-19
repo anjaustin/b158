@@ -193,13 +193,16 @@ pip install -r requirements.txt
 ```
 3. Build the project
 ```bash
-# Manually download the model and run with local path
-huggingface-cli download microsoft/BitNet-b1.58-2B-4T-gguf --local-dir models/BitNet-b1.58-2B-4T
-python setup_env.py -md models/BitNet-b1.58-2B-4T -q i2_s
+# I2_S path: download a prebuilt GGUF and set up the runtime
+huggingface-cli download microsoft/BitNet-b1.58-2B-4T-gguf --local-dir models/BitNet-b1.58-2B-4T-gguf
+python setup_env.py -md models/BitNet-b1.58-2B-4T-gguf -q i2_s
 
+# TL2 path on x86: start from the bf16 Hugging Face checkpoint, not the packed GGUF repo
+huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir models/BitNet-b1.58-2B-4T-bf16
+python setup_env.py -md models/BitNet-b1.58-2B-4T-bf16 -q tl2
 ```
 <pre>
-usage: setup_env.py [-h] [--hf-repo {1bitLLM/bitnet_b1_58-large,1bitLLM/bitnet_b1_58-3B,HF1BitLLM/Llama3-8B-1.58-100B-tokens,tiiuae/Falcon3-1B-Instruct-1.58bit,tiiuae/Falcon3-3B-Instruct-1.58bit,tiiuae/Falcon3-7B-Instruct-1.58bit,tiiuae/Falcon3-10B-Instruct-1.58bit}] [--model-dir MODEL_DIR] [--log-dir LOG_DIR] [--quant-type {i2_s,tl1}] [--quant-embd]
+usage: setup_env.py [-h] [--hf-repo {1bitLLM/bitnet_b1_58-large,1bitLLM/bitnet_b1_58-3B,HF1BitLLM/Llama3-8B-1.58-100B-tokens,tiiuae/Falcon3-1B-Instruct-1.58bit,tiiuae/Falcon3-3B-Instruct-1.58bit,tiiuae/Falcon3-7B-Instruct-1.58bit,tiiuae/Falcon3-10B-Instruct-1.58bit}] [--model-dir MODEL_DIR] [--log-dir LOG_DIR] [--quant-type {i2_s,tl1,tl2}] [--quant-embd]
                     [--use-pretuned]
 
 Setup the environment for running inference
@@ -212,16 +215,22 @@ optional arguments:
                         Directory to save/load the model
   --log-dir LOG_DIR, -ld LOG_DIR
                         Directory to save the logging info
-  --quant-type {i2_s,tl1}, -q {i2_s,tl1}
-                        Quantization type
+  --quant-type {i2_s,tl1,tl2}, -q {i2_s,tl1,tl2}
+                         Quantization type
   --quant-embd          Quantize the embeddings to f16
   --use-pretuned, -p    Use the pretuned kernel parameters
 </pre>
+
+> [!IMPORTANT]
+> `tl2` is the x86 LUT path. Convert TL2 models from the `*-bf16` Hugging Face checkpoint, not from the prepacked `*-gguf` repo. If you change TL2 codegen or enable `GGML_BITNET_X86_TL2`, run a full `make clean && make ...` in `3rdparty/llama.cpp` so `ggml.c` and the LUT objects are rebuilt together.
 ## Usage
 ### Basic usage
 ```bash
 # Run inference with the quantized model
 python run_inference.py -m models/BitNet-b1.58-2B-4T/ggml-model-i2_s.gguf -p "You are a helpful assistant" -cnv
+
+# Example: run the x86 TL2 model directly with llama.cpp
+./3rdparty/llama.cpp/llama-cli -m models/BitNet-b1.58-2B-4T-bf16/ggml-model-tl2.gguf -p "Hi" -n 32 -t 4 --no-warmup
 ```
 <pre>
 usage: run_inference.py [-h] [-m MODEL] [-n N_PREDICT] -p PROMPT [-t THREADS] [-c CTX_SIZE] [-temp TEMPERATURE] [-cnv]
@@ -297,12 +306,18 @@ python utils/e2e_benchmark.py -m models/dummy-bitnet-125m.tl1.gguf -p 512 -n 128
 ### Convert from `.safetensors` Checkpoints
 
 ```sh
-# Prepare the .safetensors model file
+# Prepare the bf16 .safetensors model file
 huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir ./models/bitnet-b1.58-2B-4T-bf16
 
-# Convert to gguf model
+# Convert to I2_S GGUF
 python ./utils/convert-helper-bitnet.py ./models/bitnet-b1.58-2B-4T-bf16
+
+# Convert to TL2 GGUF on x86
+python ./utils/codegen_tl2.py --model BitNet-b1.58-2B-4T --BM 160,384,160,160 --BK 96,96,96,96 --bm 32,32,32,32
+python ./utils/convert-hf-to-gguf-bitnet.py ./models/bitnet-b1.58-2B-4T-bf16 --outtype tl2 --quant-embd --outfile ./models/bitnet-b1.58-2B-4T-bf16/ggml-model-tl2.gguf
 ```
+
+For the 2B model on x86, recent single-thread `llama-bench` runs in this repo measured roughly `pp512 = 9.93 tok/s` and `tg128 = 6.63 tok/s` for TL2, versus `pp512 = 11.03 tok/s` and `tg128 = 5.89 tok/s` for I2_S. In other words, TL2 currently improves decode throughput and memory footprint, while I2_S remains faster on prompt processing.
 
 ### FAQ (Frequently Asked Questions)📌 
 
